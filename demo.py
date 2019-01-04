@@ -79,6 +79,13 @@ def demo():
     print("  \033[2m(the first 3 of {} in first block)\033[0m".format(len(flat)))
     print_hr()
 
+    print("Calling: /get_blocks_by_height.bin")
+    heights = [1738194, 1738195]
+    result = daemon.get_blocks_by_height(heights)
+    print("Response blocks returned:")
+    print("  {}".format(result.blocks.count))
+    print_hr()
+
     print("Done!")
     print_hr()
 

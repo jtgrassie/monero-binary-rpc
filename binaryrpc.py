@@ -64,7 +64,8 @@ STORAGE_VERSION = 1
 
 
 class PortableArray(Structure):
-    """Abstract base class for portable storage arrays.
+    """
+    Abstract base class for portable storage arrays.
 
     This class adds slicing and indexing to our concrete array types.
     """
@@ -96,6 +97,10 @@ class PortableArray(Structure):
     
     def __len__(self):
         return self.count
+
+
+class PODType():
+    pass
 
 
 class Int64Array(PortableArray):
@@ -148,22 +153,22 @@ class BoolArray(PortableArray):
             ("index", c_uint)]
 
 
-class BlobData(Structure):
+class BlobData(Structure, PODType):
     _fields_ = [("count", c_uint), ("data", c_char_p)]
 
 
-class BlobDataArray(PortableArray):
+class BlobDataArray(PortableArray, PODType):
     _fields_ = [("count", c_uint), ("data", POINTER(BlobData)),
             ("index", c_uint)]
 
 
-class Hash(Structure):
+class Hash(Structure, PODType):
     _fields_ = [("data", c_ubyte * 32)]
     def __repr__(self):
         return binascii.hexlify(self.data)
 
 
-class HashArray(PortableArray):
+class HashArray(PortableArray, PODType):
     _fields_ = [("count", c_uint), ("data", POINTER(Hash)),
             ("index", c_uint)]
 
@@ -180,11 +185,11 @@ class RPCError(Exception):
     pass
 
 
-class GetOutputsOut(Structure):
+class GetOutputsOut(PortableArray, PODType):
     _fields_ = [("amount", c_ulonglong), ("index", c_ulonglong)]
 
 
-class GetOutputsOutArray(PortableArray):
+class GetOutputsOutArray(PortableArray, PODType):
     _fields_ = [("count", c_uint), ("data", POINTER(GetOutputsOut)),
             ("index", c_uint)]
 
@@ -288,7 +293,6 @@ class GetBlocksRequest(Structure):
             ("start_height", c_ulonglong),
             ("prune", c_bool),
             ("no_miner_tx", c_bool)]
-    pass
 
 
 class GetBlocksResponse(Structure):
@@ -301,8 +305,20 @@ class GetBlocksResponse(Structure):
             ("untrusted", c_bool)]
 
 
+class GetBlocksByHeightRequest(Structure):
+    _fields_ = [("heights", UInt64Array)]
+
+
+class GetBlocksByHeightResponse(Structure):
+    _fields_ = [
+            ("blocks", BlockCompleteEntryArray),
+            ("status", c_char_p),
+            ("untrusted", c_bool)]
+
+
 def pack_vint(n):
-    """Pack an integer to a varint and return the varint.
+    """
+    Pack an integer to a varint and return the varint.
 
     The mask (which occupies the lowest 2 bits) is used to identify how many
     more bytes are needing when reading back. E.g. a reader reads the first
@@ -323,7 +339,8 @@ def pack_vint(n):
 
 
 def unpack_vint(buf, offset):
-    """Unpack a varint returning it"s unpacked value and width consumed.
+    """
+    Unpack a varint returning it's unpacked value and width consumed.
 
     The 2 least significant bits specify the extra byte width of the varint.
     """
@@ -335,56 +352,127 @@ def unpack_vint(buf, offset):
     return v, w
 
 
-def pack_field(data, f, n, v):
-    """Packs a fields type and data to the supplied request"s bytearray.
-
-    Structure is as follows.
-    - field type (byte)
-    - field data (dependent on type)
+def pack_array(data, f):
     """
+    Packs an array to the supplied bytearray.
+
+    Writes:
+    - count (varint)
+    - write each elements data
+    """
+    assert isinstance(f, PortableArray), "Must be a PortableArray!"
+    c = f.count
+    data.extend(pack_vint(c))
+    for e in f:
+        pack_field_data(data, e)
+        
+
+def pack_type(data, f):
+    ft = None
     if hasattr(f, "_length_") and f._type_ is c_ubyte:
         ft, ff = SERIALIZE_TYPES[c_char_p]
-        data.extend(struct.pack("B", ft))
+    elif hasattr(f, "count") and hasattr(f, "data"):
+        if isinstance(f, PODType):
+            ft, ff = SERIALIZE_TYPES[c_char_p]
+        else:
+            ft, ff = SERIALIZE_TYPES.get(f.data._type_, (None, None))
+            if ft is None:
+                if issubclass(f.data._type_, PortableArray) and issubclass(f.data._type_, PODType):
+                    ft, ff = SERIALIZE_TYPES[c_char_p]
+                    ft |= SERIALIZE_FLAG_ARRAY
+                elif issubclass(f.data._type_, PortableArray):
+                    ft = SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_ARRAY
+                else:
+                    ft = SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_OBJECT
+            else:
+                ft |= SERIALIZE_FLAG_ARRAY
+    elif isinstance(f, Structure) and not isinstance(f, PortableArray):
+        ft = SERIALIZE_TYPE_OBJECT
+    elif type(f) is long:
+        ft, ff = SERIALIZE_TYPES[c_ulong]
+    elif type(f) is bool:
+        ft, ff = SERIALIZE_TYPES[c_bool]
+    else:
+        ft, ff = SERIALIZE_TYPES[type(f)]
+
+    assert ft is not None, "Cannot determine type for {}!".format(f)
+    _log.debug("Packing type {} for instance {}".format(hex(ft), f))
+    data.extend(struct.pack("B", ft))
+    
+
+def pack_field_data(data, f):
+    if hasattr(f, "_length_") and f._type_ is c_ubyte:
+        ft, ff = SERIALIZE_TYPES[c_char_p]
         sl = len(f)
-        _log.debug("  packing: {} {} {}B bytes".format(n, f._type_, sl))
+        _log.debug("  packing: {} {}B bytes".format(f._type_, sl))
         data.extend(pack_vint(sl))
         data.extend(struct.pack("{}B".format(sl), *f))
-    elif hasattr(f, "count") and hasattr(f, "data"):
+    elif isinstance(f, PortableArray) and not isinstance(f, PODType):
+        ft, ff = SERIALIZE_TYPES.get(f.data._type_, (None, None))
+        if ft is None:
+            ft = SERIALIZE_TYPE_OBJECT
+        ft |= SERIALIZE_FLAG_ARRAY
+        pack_array(data, f)
+    elif isinstance(f, PortableArray) and isinstance(f, PODType):
         ft, ff = SERIALIZE_TYPES[c_char_p]
-        data.extend(struct.pack("B", ft))
         es = sizeof(f.data._type_)
         data.extend(pack_vint(f.count * es))
-        _log.debug("  packing: {} {} {} count {}".format(n, type(f), f.data._type_, f.count))
+        _log.debug("  packing: Array as POD {} {} count {}".format(type(f), f.data._type_, f.count))
         for i in range(f.count):
             if hasattr(f.data[i],"data"):
                 data.extend(struct.pack("{}B".format(es), *f.data[i].data))
             else:
                 pack_fields(data, f.data[i])
+    elif isinstance(f, Structure) and not isinstance(f, PortableArray):
+        pack_fields(data, f)
     elif isinstance(f, c_char_p):
         ft, ff = SERIALIZE_TYPES[type(f)]
         _log.debug("  packing: {} {}".format(n, sl,ff))
-        data.extend(struct.pack("B", ft))
         sl = len(f.value)
         data.extend(pack_vint(sl))
         data.extend(struct.pack("{}{}".format(sl,ff), f.value))
-    else:
-        ft, ff = SERIALIZE_TYPES[v]
-        _log.debug("  packing: {} {}".format(n, ff))
-        data.extend(struct.pack("B", ft))
+    elif type(f) is long:
+        ft, ff = SERIALIZE_TYPES[c_ulong]
         data.extend(struct.pack(ff, f))
+    elif type(f) is bool:
+        ft, ff = SERIALIZE_TYPES[c_bool]
+        data.extend(struct.pack(ff, f))
+    else:
+        ft, ff = SERIALIZE_TYPES[type(f)]
+        _log.debug("  packing: {} {}".format(n, ff))
+
+
+def pack_field(data, f):
+    """
+    Packs a field type and data to the supplied bytearray.
+
+    Writes:
+    - field type (byte)
+    - field data (dependent on type)
+    """
+    pack_type(data, f)
+    pack_field_data(data, f)
 
 
 def pack_fields(data, obj):
-    ec = len(obj._fields_)
-    data.extend(pack_vint(ec))
-    for n,v in obj._fields_:
+    """
+    Packs a fields type and data to the supplied bytearray.
+
+    Writes:
+    - field count (varint)
+    """
+    assert isinstance(obj, Structure), "Must be a ctypes Structure!"
+    c = len(obj._fields_)
+    data.extend(pack_vint(c))
+    for n,t in obj._fields_:
         data.extend(struct.pack("B {}s".format(len(n)), len(n), n))
         f = getattr(obj, n)
-        pack_field(data, f, n, v)
+        pack_field(data, f)
 
 
 def pack_request(obj):
-    """Pack a request object to binary format.
+    """
+    Pack a request object to binary format.
 
     Returns a bytearray of the packed request object.
 
@@ -408,6 +496,8 @@ def pack_request(obj):
     data.extend(struct.pack("> Q B", STORAGE_SIGNATURE, STORAGE_VERSION))
 
     pack_fields(data, obj)
+
+    _log.debug("Final request bytes: {}".format(binascii.hexlify(data)))
     
     return data
 
@@ -594,7 +684,8 @@ def unpack_object_fields(buf, offset, parent):
 
 
 def unpack_response(buf, obj):
-    """Unpack a binary response to a supplied object instance.
+    """
+    Unpack a binary response to a supplied object instance.
 
     Structure of the binary data is as follows:
 
@@ -622,8 +713,11 @@ def unpack_response(buf, obj):
 
 
 # The meat of the pudding...
-class BinaryRPC:
-    """A wrapper for the Monero RPC binary interface.
+class BinaryRPC(object):
+    """
+    A wrapper for the Monero RPC binary interface.
+
+    Create an instance of this class for each daemon / wallet.
     """
     def __init__(self, proto="http", host="localhost", port=18081):
         self.proto = proto
@@ -677,6 +771,15 @@ class BinaryRPC:
             *map(lambda h: Hash((c_ubyte*32)(*bytearray.fromhex(h))), block_ids)))
         command = GetBlocksRequest(block_ids_bin, start_height, prune, no_miner_tx)
         response = GetBlocksResponse()
+        self._raw_request(path, command, response)
+        return response
+
+    def get_blocks_by_height(self, heights):
+        path = "/get_blocks_by_height.bin"
+        hc = len(heights)
+        heights_bin = UInt64Array(hc, (c_ulonglong * hc)(*heights))
+        command = GetBlocksByHeightRequest(heights_bin)
+        response = GetBlocksByHeightResponse()
         self._raw_request(path, command, response)
         return response
 
