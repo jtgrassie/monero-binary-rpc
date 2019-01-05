@@ -32,9 +32,14 @@ import binascii
 import requests
 import logging
 import pdb
+import sys
 from ctypes import *
 
 __all__ = ["BinaryRPC"]
+
+if sys.version_info > (3,):
+    buffer = memoryview
+    long = int
 
 _log = logging.getLogger(__name__)
 _log.setLevel(logging.INFO)
@@ -91,6 +96,9 @@ class PortableArray(Structure):
         rv = self.data[self.index]
         self.index += 1
         return rv
+
+    def __next__(self):
+        return self.next()
 
     def __getitem__(self, sliced):
         return self.data[sliced]
@@ -165,7 +173,7 @@ class BlobDataArray(PortableArray, PODType):
 class Hash(Structure, PODType):
     _fields_ = [("data", c_ubyte * 32)]
     def __repr__(self):
-        return binascii.hexlify(self.data)
+        return binascii.hexlify(self.data).decode()
 
 
 class HashArray(PortableArray, PODType):
@@ -465,7 +473,8 @@ def pack_fields(data, obj):
     c = len(obj._fields_)
     data.extend(pack_vint(c))
     for n,t in obj._fields_:
-        data.extend(struct.pack("B {}s".format(len(n)), len(n), n))
+        n = str(n)
+        data.extend(struct.pack("B {}s".format(len(n)), len(n), n.encode()))
         f = getattr(obj, n)
         pack_field(data, f)
 
@@ -507,7 +516,7 @@ def unpack_label(buf, offset):
     offset += 1
     fname, = struct.unpack_from("{}s".format(flen), buf, offset)
     offset += flen
-    return fname, offset
+    return fname.decode(), offset
 
 
 def unpack_array_object(buf, offset, arr, etype):
@@ -538,8 +547,13 @@ def unpack_field(buf, offset, parent, fname=None):
     typeid, = struct.unpack_from("B", buf, offset)
     offset += 1
 
-    ct = next((t for t,v in SERIALIZE_TYPES.iteritems() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
-    ff = next((v for t,v in SERIALIZE_TYPES.iteritems() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
+    try:
+        ct = next((t for t,v in SERIALIZE_TYPES.iteritems() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
+        ff = next((v for t,v in SERIALIZE_TYPES.iteritems() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
+    except AttributeError:
+        ct = next((t for t,v in SERIALIZE_TYPES.items() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
+        ff = next((v for t,v in SERIALIZE_TYPES.items() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
+
     _log.debug("unpacking: found ct {} and typeid {} for fname {}".format(ct, typeid, fname))
 
     # First handle this special case of member array in object
@@ -653,7 +667,7 @@ def unpack_field(buf, offset, parent, fname=None):
             arrlen, w = unpack_vint(buf, offset)
             offset += w
             item_size = sizeof(item_type)
-            item_count = arrlen / item_size
+            item_count = arrlen // item_size
             arr = (item_type * item_count)()
             _log.debug("unpacking: {} {} {} count {}".format(fname, ftype, item_type, item_count))
             for item in arr:
