@@ -62,8 +62,8 @@ def demo():
     outputs = [(500000000000, 154735)]
     get_txid = True
     result = daemon.get_outs(outputs, get_txid)
-    print("Response status:")
-    print("  {}".format(result.status.decode()));
+    print("Response outs[0].key:")
+    print("  {}".format(result.outs[0].key));
     print_hr()
 
     print("Calling: /get_blocks.bin")

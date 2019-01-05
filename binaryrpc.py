@@ -193,11 +193,11 @@ class RPCError(Exception):
     pass
 
 
-class GetOutputsOut(PortableArray, PODType):
+class GetOutputsOut(Structure):
     _fields_ = [("amount", c_ulonglong), ("index", c_ulonglong)]
 
 
-class GetOutputsOutArray(PortableArray, PODType):
+class GetOutputsOutArray(PortableArray):
     _fields_ = [("count", c_uint), ("data", POINTER(GetOutputsOut)),
             ("index", c_uint)]
 
@@ -646,13 +646,20 @@ def unpack_field(buf, offset, parent, fname=None):
         _log.warn("Not yet implemented SERIALIZE_TYPE_ARRAY")
     else:
         # Must have a match on ct and ff above
-        if ct is c_char_p and not isinstance(field, HashArray) and not isinstance(field, BlobData):
+        if (ct is c_char_p and not isinstance(field, HashArray) 
+                and not isinstance(field, BlobData) and not isinstance(field, Hash)):
             size, w = unpack_vint(buf, offset)
             offset += w
             _log.debug("unpacking: {} {}s string".format(fname, size))
             val, = struct.unpack_from("{}s".format(size), buf, offset)
             offset += size
             setattr(parent, fname, val)
+        elif isinstance(field, Hash):
+            size, w = unpack_vint(buf, offset)
+            offset += w
+            _log.debug("unpacking: {} {}s string".format(fname, size))
+            field.data = struct.unpack_from("{}B".format(size), buf, offset)
+            offset += size
         elif isinstance(field, BlobData):
             size, w = unpack_vint(buf, offset)
             offset += w
