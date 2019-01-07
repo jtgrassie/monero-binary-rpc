@@ -148,7 +148,7 @@ These can be arrays of standard integer types, strings or
 
 - [Core RPC
   definitions](https://github.com/monero-project/monero/blob/master/src/rpc/core_rpc_server_commands_defs.h)
-- [CryptoNote
+- [CryptoNote protocol
   definitions](https://github.com/monero-project/monero/blob/master/src/cryptonote_protocol/cryptonote_protocol_defs.h)
 
 
