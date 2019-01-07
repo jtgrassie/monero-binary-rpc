@@ -285,7 +285,6 @@ class GetOutsResponse(Structure):
 
 class GetTransactionPoolHashesRequest(Structure):
     _fields_ = []
-    pass
 
 
 class GetTransactionPoolHashesResponse(Structure):
@@ -326,12 +325,13 @@ class GetBlocksByHeightResponse(Structure):
 
 def pack_vint(n):
     """
-    Pack an integer to a varint and return the varint.
+    Pack an integer to a varint.
 
-    The mask (which occupies the lowest 2 bits) is used to identify how many
-    more bytes are needing when reading back. E.g. a reader reads the first
-    byte, inspects the mask bits, and if needed then reads more bytes.
+    Returns the varint.
     """
+    # The mask (which occupies the lowest 2 bits) is used to identify how many
+    # more bytes are needing when reading back. E.g. a reader reads the first
+    # byte, inspects the mask bits, and if needed then reads more bytes.
     mask = 0
     if n < 64:
         mask = 0
@@ -348,10 +348,11 @@ def pack_vint(n):
 
 def unpack_vint(buf, offset):
     """
-    Unpack a varint returning it's unpacked value and width consumed.
-
-    The 2 least significant bits specify the extra byte width of the varint.
+    Unpack a varint from the supplied buffer.
+    
+    Returns a tuple of the unpacked number and width consumed.
     """
+    # The 2 least significant bits specify the extra byte width of the varint.
     mask, = struct.unpack_from("B", buf, offset)
     mask &= VINT_MASK
     w = VINT_WIDTHS[mask]
@@ -360,114 +361,124 @@ def unpack_vint(buf, offset):
     return v, w
 
 
-def pack_array(data, f):
+def pack_array_entry(data, arr):
     """
-    Packs an array to the supplied bytearray.
+    Pack an array to the supplied bytearray.
 
     Writes:
     - count (varint)
-    - write each elements data
+    - write each elements entry data
     """
-    assert isinstance(f, PortableArray), "Must be a PortableArray!"
-    c = f.count
+    assert isinstance(arr, PortableArray), "Must be a PortableArray!"
+    c = arr.count
     data.extend(pack_vint(c))
-    for e in f:
-        pack_field_data(data, e)
+    for e in arr:
+        pack_entry_data(data, e)
         
 
-def pack_type(data, f):
-    ft = None
-    if hasattr(f, "_length_") and f._type_ is c_ubyte:
-        ft, ff = SERIALIZE_TYPES[c_char_p]
-    elif hasattr(f, "count") and hasattr(f, "data"):
-        if isinstance(f, PODType):
-            ft, ff = SERIALIZE_TYPES[c_char_p]
-        else:
-            ft, ff = SERIALIZE_TYPES.get(f.data._type_, (None, None))
-            if ft is None:
-                if issubclass(f.data._type_, PortableArray) and issubclass(f.data._type_, PODType):
-                    ft, ff = SERIALIZE_TYPES[c_char_p]
-                    ft |= SERIALIZE_FLAG_ARRAY
-                elif issubclass(f.data._type_, PortableArray):
-                    ft = SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_ARRAY
-                else:
-                    ft = SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_OBJECT
-            else:
-                ft |= SERIALIZE_FLAG_ARRAY
-    elif isinstance(f, Structure) and not isinstance(f, PortableArray):
-        ft = SERIALIZE_TYPE_OBJECT
-    elif type(f) is long:
-        ft, ff = SERIALIZE_TYPES[c_ulong]
-    elif type(f) is bool:
-        ft, ff = SERIALIZE_TYPES[c_bool]
-    else:
-        ft, ff = SERIALIZE_TYPES[type(f)]
+def pack_entry_type(data, field):
+    """
+    Pack an entry type ID to the supplied bytearray.
 
-    assert ft is not None, "Cannot determine type for {}!".format(f)
-    _log.debug("Packing type {} for instance {}".format(hex(ft), f))
-    data.extend(struct.pack("B", ft))
+    Type is deduced from the supplied field.
+    """
+    entry_type = None
+    if hasattr(field, "_length_") and field._type_ is c_ubyte:
+        entry_type, ff = SERIALIZE_TYPES[c_char_p]
+    elif hasattr(field, "count") and hasattr(field, "data"):
+        if isinstance(field, PODType):
+            entry_type, ff = SERIALIZE_TYPES[c_char_p]
+        else:
+            entry_type, ff = SERIALIZE_TYPES.get(field.data._type_, (None, None))
+            if entry_type is None:
+                if (issubclass(field.data._type_, PortableArray)
+                        and issubclass(field.data._type_, PODType)):
+                    entry_type, ff = SERIALIZE_TYPES[c_char_p]
+                    entry_type |= SERIALIZE_FLAG_ARRAY
+                elif issubclass(field.data._type_, PortableArray):
+                    entry_type = SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_ARRAY
+                else:
+                    entry_type = SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_OBJECT
+            else:
+                entry_type |= SERIALIZE_FLAG_ARRAY
+    elif isinstance(field, Structure) and not isinstance(field, PortableArray):
+        entry_type = SERIALIZE_TYPE_OBJECT
+    elif type(field) is long:
+        entry_type, ff = SERIALIZE_TYPES[c_ulong]
+    elif type(field) is bool:
+        entry_type, ff = SERIALIZE_TYPES[c_bool]
+    else:
+        entry_type, ff = SERIALIZE_TYPES[type(field)]
+
+    assert entry_type is not None, "Cannot determine type for {}!".format(field)
+    _log.debug("packing: type {} for instance {}".format(hex(entry_type), field))
+    data.extend(struct.pack("B", entry_type))
     
 
-def pack_field_data(data, f):
-    if hasattr(f, "_length_") and f._type_ is c_ubyte:
-        ft, ff = SERIALIZE_TYPES[c_char_p]
-        sl = len(f)
-        _log.debug("  packing: {} {}B bytes".format(f._type_, sl))
+def pack_entry_data(data, field):
+    """
+    Pack an entries data to the supplied bytearray.
+    """
+    if hasattr(field, "_length_") and field._type_ is c_ubyte:
+        entry_type, ff = SERIALIZE_TYPES[c_char_p]
+        sl = len(field)
+        _log.debug("packing: {} {}B bytes".format(field._type_, sl))
         data.extend(pack_vint(sl))
-        data.extend(struct.pack("{}B".format(sl), *f))
-    elif isinstance(f, PortableArray) and not isinstance(f, PODType):
-        ft, ff = SERIALIZE_TYPES.get(f.data._type_, (None, None))
-        if ft is None:
-            ft = SERIALIZE_TYPE_OBJECT
-        ft |= SERIALIZE_FLAG_ARRAY
-        pack_array(data, f)
-    elif isinstance(f, PortableArray) and isinstance(f, PODType):
-        ft, ff = SERIALIZE_TYPES[c_char_p]
-        es = sizeof(f.data._type_)
-        data.extend(pack_vint(f.count * es))
-        _log.debug("  packing: Array as POD {} {} count {}".format(type(f), f.data._type_, f.count))
-        for i in range(f.count):
-            if hasattr(f.data[i],"data"):
-                data.extend(struct.pack("{}B".format(es), *f.data[i].data))
+        data.extend(struct.pack("{}B".format(sl), *field))
+    elif isinstance(field, PortableArray) and not isinstance(field, PODType):
+        entry_type, ff = SERIALIZE_TYPES.get(field.data._type_, (None, None))
+        if entry_type is None:
+            entry_type = SERIALIZE_TYPE_OBJECT
+        entry_type |= SERIALIZE_FLAG_ARRAY
+        pack_array_entry(data, field)
+    elif isinstance(field, PortableArray) and isinstance(field, PODType):
+        entry_type, ff = SERIALIZE_TYPES[c_char_p]
+        es = sizeof(field.data._type_)
+        data.extend(pack_vint(field.count * es))
+        _log.debug("packing: Array as POD {} {} count {}"
+                .format(type(field), field.data._type_, field.count))
+        for i in range(field.count):
+            if hasattr(field.data[i],"data"):
+                data.extend(struct.pack("{}B".format(es), *field.data[i].data))
             else:
-                pack_fields(data, f.data[i])
-    elif isinstance(f, Structure) and not isinstance(f, PortableArray):
-        pack_fields(data, f)
-    elif isinstance(f, c_char_p):
-        ft, ff = SERIALIZE_TYPES[type(f)]
-        _log.debug("  packing: {} {}".format(n, sl,ff))
-        sl = len(f.value)
+                pack_entries(data, field.data[i])
+    elif isinstance(field, Structure) and not isinstance(field, PortableArray):
+        pack_entries(data, field)
+    elif isinstance(field, c_char_p):
+        entry_type, ff = SERIALIZE_TYPES[type(field)]
+        _log.debug("packing: {} {}".format(n, sl,ff))
+        sl = len(field.value)
         data.extend(pack_vint(sl))
-        data.extend(struct.pack("{}{}".format(sl,ff), f.value))
-    elif type(f) is long:
-        ft, ff = SERIALIZE_TYPES[c_ulong]
-        data.extend(struct.pack(ff, f))
-    elif type(f) is bool:
-        ft, ff = SERIALIZE_TYPES[c_bool]
-        data.extend(struct.pack(ff, f))
+        data.extend(struct.pack("{}{}".format(sl,ff), field.value))
+    elif type(field) is long:
+        entry_type, ff = SERIALIZE_TYPES[c_ulong]
+        data.extend(struct.pack(ff, field))
+    elif type(field) is bool:
+        entry_type, ff = SERIALIZE_TYPES[c_bool]
+        data.extend(struct.pack(ff, field))
     else:
-        ft, ff = SERIALIZE_TYPES[type(f)]
-        _log.debug("  packing: {} {}".format(n, ff))
+        entry_type, ff = SERIALIZE_TYPES[type(field)]
+        data.extend(struct.pack(ff, field))
 
 
-def pack_field(data, f):
+def pack_entry(data, f):
     """
-    Packs a field type and data to the supplied bytearray.
+    Pack an entry type and data to the supplied bytearray.
 
     Writes:
-    - field type (byte)
-    - field data (dependent on type)
+    - entry type (byte)
+    - entry data (dependent on type)
     """
-    pack_type(data, f)
-    pack_field_data(data, f)
+    pack_entry_type(data, f)
+    pack_entry_data(data, f)
 
 
-def pack_fields(data, obj):
+def pack_entries(data, obj):
     """
-    Packs a fields type and data to the supplied bytearray.
+    Pack a section's entries to the supplied bytearray.
 
     Writes:
-    - field count (varint)
+    - entry count (varint)
     """
     assert isinstance(obj, Structure), "Must be a ctypes Structure!"
     c = len(obj._fields_)
@@ -476,7 +487,7 @@ def pack_fields(data, obj):
         n = str(n)
         data.extend(struct.pack("B {}s".format(len(n)), len(n), n.encode()))
         f = getattr(obj, n)
-        pack_field(data, f)
+        pack_entry(data, f)
 
 
 def pack_request(obj):
@@ -485,80 +496,97 @@ def pack_request(obj):
 
     Returns a bytearray of the packed request object.
 
-    Introspection is used on the supplied object to infer field types.
+    Introspection is used on the supplied object to infer entry types.
     Structure of the binary data is as follows:
 
     HEADER
     ------
     - signature (uint64)
     - version (byte)
-    - field count (varint)
+    - entry count (varint)
 
     FIELD []
     --------
-    - field name length (byte)
-    - field name (char[])
-    - field type (byte)
-    - field value (dependent on type)
+    - entry name length (byte)
+    - entry name (char[])
+    - entry type (byte)
+    - entry value (dependent on type)
     """
     data = bytearray()
     data.extend(struct.pack("> Q B", STORAGE_SIGNATURE, STORAGE_VERSION))
-
-    pack_fields(data, obj)
-
+    pack_entries(data, obj)
     _log.debug("Final request bytes: {}".format(binascii.hexlify(data)))
-    
     return data
 
 
 def unpack_label(buf, offset):
-    flen, = struct.unpack_from("B", buf, offset)
+    """
+    Unpack an entry label.
+
+    Returns a tuple of the label and new offset after reading.
+    """
+    length, = struct.unpack_from("B", buf, offset)
     offset += 1
-    fname, = struct.unpack_from("{}s".format(flen), buf, offset)
-    offset += flen
-    return fname.decode(), offset
+    entry_name, = struct.unpack_from("{}s".format(length), buf, offset)
+    offset += length
+    return entry_name.decode(), offset
 
 
-def unpack_array_object(buf, offset, arr, etype):
+def unpack_array_object(buf, offset, arr, element_type):
+    """
+    Unpack an array of objects from supplied buffer.
+
+    Returns the new offset after reading.
+    """
     _log.debug("unpacking: filling array {}".format(type(arr)))
-    etype = etype or arr.data._type_
-    al = arr.count
+    element_type = element_type or arr.data._type_
+    arrlen = arr.count
 
     # This bit is a kinda cludge as this method is supposed to be for
     # unpacking just objects in the array, not arrays in arrays.
-    # It is used when unpacking an array memver in a serialized object array.
+    # It is used when unpacking an array member in a serialized object array.
     # e.g. SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_OBJECT
-    if issubclass(etype, PortableArray):
-        for i in range(al):
+    if issubclass(element_type, PortableArray):
+        for i in range(arrlen):
             field_count, w = unpack_vint(buf, offset)
             offset += w
             assert field_count == 1, "There is more than 1 field for this object holding an array!"
             field_name, offset = unpack_label(buf, offset)
-            offset = unpack_field(buf, offset, arr[i])
+            offset = unpack_entry(buf, offset, arr[i])
         return offset
 
-    es = sizeof(etype)
-    ec = al / es
+    es = sizeof(element_type)
+    ec = arrlen / es
     for e in arr:
-        offset = unpack_object_fields(buf, offset, e)
+        offset = unpack_section(buf, offset, e)
     return offset
 
-def unpack_field(buf, offset, parent, fname=None):
+def unpack_entry(buf, offset, parent, entry_name=None):
+    """
+    Unpack an entry from the supplied buffer.
+
+    Returns the new offset after reading.
+    """
     typeid, = struct.unpack_from("B", buf, offset)
     offset += 1
 
     try:
-        ct = next((t for t,v in SERIALIZE_TYPES.iteritems() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
-        ff = next((v for t,v in SERIALIZE_TYPES.iteritems() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
+        ct = next((t for t,v in SERIALIZE_TYPES.iteritems()
+            if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
+        ff = next((v for t,v in SERIALIZE_TYPES.iteritems()
+            if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
     except AttributeError:
-        ct = next((t for t,v in SERIALIZE_TYPES.items() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
-        ff = next((v for t,v in SERIALIZE_TYPES.items() if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
+        ct = next((t for t,v in SERIALIZE_TYPES.items()
+            if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), None)
+        ff = next((v for t,v in SERIALIZE_TYPES.items()
+            if v[0] == typeid & ~SERIALIZE_FLAG_ARRAY), (None, None))[1]
 
-    _log.debug("unpacking: found ct {} and typeid {} for fname {}".format(ct, typeid, fname))
+    _log.debug("unpacking: found ct {} and typeid {} for entry_name {}"
+            .format(ct, typeid, entry_name))
 
     # First handle this special case of member array in object
     # e.g. SERIALIZE_FLAG_ARRAY | SERIALIZE_TYPE_OBJECT
-    if fname is None and isinstance(parent, PortableArray):
+    if entry_name is None and isinstance(parent, PortableArray):
         arrlen, w = unpack_vint(buf, offset)
         offset += w
         parent.data = (ct * arrlen)()
@@ -569,12 +597,12 @@ def unpack_field(buf, offset, parent, fname=None):
             parent.data[i] = val
         return offset
 
-    field = getattr(parent, fname)
-    ftype = type(field)
+    field = getattr(parent, entry_name)
+    entry_type = type(field)
 
     if typeid & SERIALIZE_FLAG_ARRAY and ff:
         # Simple arrays such as array of u64's
-        # note we stil need to match this to our parent.fname as could be an
+        # note we stil need to match this to our parent.entry_name as could be an
         # array of strings for example, which may be Hash or Blob types
 
         if hasattr(field, "data") and hasattr(field, "count") and ct is c_char_p:
@@ -595,36 +623,37 @@ def unpack_field(buf, offset, parent, fname=None):
         # Following works for simple types but not prefixed strings
         arrlen, w = unpack_vint(buf, offset)
         offset += w
-        _log.debug("unpacking: {} {} array with {} values".format(fname, ff, arrlen))
+        _log.debug("unpacking: {} {} array with {} values".format(entry_name, ff, arrlen))
         arr = (ct * arrlen)(*struct.unpack_from("{}{}".format(arrlen, ff), buf, offset))
         offset += arrlen * sizeof(ct)
-        arr_type = type(getattr(parent, fname))
+        arr_type = type(getattr(parent, entry_name))
         arr_obj = arr_type()
         arr_obj.count = arrlen
         arr_obj.data = arr
-        setattr(parent, fname, arr_obj)
+        setattr(parent, entry_name, arr_obj)
 
-    elif typeid & SERIALIZE_FLAG_ARRAY and typeid & ~SERIALIZE_FLAG_ARRAY == SERIALIZE_TYPE_OBJECT:
+    elif (typeid & SERIALIZE_FLAG_ARRAY 
+            and typeid & ~SERIALIZE_FLAG_ARRAY == SERIALIZE_TYPE_OBJECT):
         ob_count, w = unpack_vint(buf, offset)
         offset += w
 
         # Sometimes we get an actual array rather than an object
         # that holds an array in a member.
         if isinstance(field, PortableArray):
-            ct = ftype
+            ct = entry_type
             temp = ct()
             arr = (temp.data._type_ * ob_count)()
             arr.count = ob_count
-            _log.debug("unpacking: setting {} {} on {}".format(fname, ct, parent))
+            _log.debug("unpacking: setting {} {} on {}".format(entry_name, ct, parent))
             offset = unpack_array_object(buf, offset, arr, temp.data._type_)
-            p = getattr(parent, fname)
+            p = getattr(parent, entry_name)
             p.data = arr
             p.count = ob_count
             return offset
 
         # OK we're an object with a member that holds the array...
-        arr_fname = field._fields_[0][0]
-        arr_field = getattr(field, arr_fname)
+        arr_entry_name = field._fields_[0][0]
+        arr_field = getattr(field, arr_entry_name)
         arr_mtype = arr_field.data._type_
         arr_field.data = (ob_count * arr_mtype)()
         arr_field.count = ob_count
@@ -634,11 +663,12 @@ def unpack_field(buf, offset, parent, fname=None):
             offset += w
             assert field_count == 1, "There is more than 1 field for this object holding an array!"
             field_name, offset = unpack_label(buf, offset)
-            assert field_name == arr_fname, "Was expecting a field name of {}!".format(arr_fname)
+            assert field_name == arr_entry_name, "Was expecting an field name of {}!".format(arr_entry_name)
             _log.debug("unpacking: {} {}".format(arr_field.data[i], field_name))
-            offset = unpack_field(buf, offset, arr_field.data[i], field_name)
+            offset = unpack_entry(buf, offset, arr_field.data[i], field_name)
 
-    elif typeid & SERIALIZE_FLAG_ARRAY and typeid & ~SERIALIZE_FLAG_ARRAY == SERIALIZE_TYPE_ARRAY:
+    elif (typeid & SERIALIZE_FLAG_ARRAY 
+            and typeid & ~SERIALIZE_FLAG_ARRAY == SERIALIZE_TYPE_ARRAY):
         _log.warn("Not yet implemented SERIALIZE_FLAG_ARRAY|SERIALIZE_TYPE_ARRAY")
     elif typeid == SERIALIZE_TYPE_OBJECT:
         _log.warn("Not yet implemented SERIALIZE_TYPE_OBJECT")
@@ -650,20 +680,20 @@ def unpack_field(buf, offset, parent, fname=None):
                 and not isinstance(field, BlobData) and not isinstance(field, Hash)):
             size, w = unpack_vint(buf, offset)
             offset += w
-            _log.debug("unpacking: {} {}s string".format(fname, size))
+            _log.debug("unpacking: {} {}s string".format(entry_name, size))
             val, = struct.unpack_from("{}s".format(size), buf, offset)
             offset += size
-            setattr(parent, fname, val)
+            setattr(parent, entry_name, val)
         elif isinstance(field, Hash):
             size, w = unpack_vint(buf, offset)
             offset += w
-            _log.debug("unpacking: {} {}s string".format(fname, size))
+            _log.debug("unpacking: {} {}s string".format(entry_name, size))
             field.data = struct.unpack_from("{}B".format(size), buf, offset)
             offset += size
         elif isinstance(field, BlobData):
             size, w = unpack_vint(buf, offset)
             offset += w
-            _log.debug("unpacking: {} {}s string".format(fname, size))
+            _log.debug("unpacking: {} {}s string".format(entry_name, size))
             val, = struct.unpack_from("{}s".format(size), buf, offset)
             offset += size
             field.data = val
@@ -676,31 +706,37 @@ def unpack_field(buf, offset, parent, fname=None):
             item_size = sizeof(item_type)
             item_count = arrlen // item_size
             arr = (item_type * item_count)()
-            _log.debug("unpacking: {} {} {} count {}".format(fname, ftype, item_type, item_count))
+            _log.debug("unpacking: {} {} {} count {}"
+                    .format(entry_name, entry_type, item_type, item_count))
             for item in arr:
                 item.data = struct.unpack_from("{}B".format(item_size), buf, offset)
                 offset += item_size
             # TODO: revisit to find out why I did this!
             # Its probably just type juggling which can be improved!
-            ob = ftype(item_count, arr)
+            ob = entry_type(item_count, arr)
             ob.count = item_count
-            setattr(parent, fname, ob)
+            setattr(parent, entry_name, ob)
         else:
-            _log.debug("unpacking: {} {}".format(fname, ff))
+            _log.debug("unpacking: {} {}".format(entry_name, ff))
             val, = struct.unpack_from(ff, buf, offset)
             offset += sizeof(ct)
-            setattr(parent, fname, ct(val))
+            setattr(parent, entry_name, ct(val))
     return offset
 
 
-def unpack_object_fields(buf, offset, parent):
+def unpack_section(buf, offset, parent):
+    """
+    Unpack a section's entries.
+
+    Returns the new offset after reading.
+    """
     fcount, w = unpack_vint(buf, offset)
     offset += w
-    _log.debug("unpacking: {} fields".format(fcount))
+    _log.debug("unpacking: {} entries".format(fcount))
     while fcount:
         fcount -= 1
-        fname, offset = unpack_label(buf, offset)
-        offset = unpack_field(buf, offset, parent, fname)
+        entry_name, offset = unpack_label(buf, offset)
+        offset = unpack_entry(buf, offset, parent, entry_name)
     return offset
 
 
@@ -714,14 +750,14 @@ def unpack_response(buf, obj):
     ------
     - signature (uint64)
     - version (byte)
-    - field count (varint)
+    - entry count (varint)
 
     FIELD []
     --------
-    - field name length (byte)
-    - field name (char[])
-    - field type (byte)
-    - field value (dependent on type)
+    - entry name length (byte)
+    - entry name (char[])
+    - entry type (byte)
+    - entry value (dependent on type)
 
     """
     offset = 0
@@ -730,7 +766,7 @@ def unpack_response(buf, obj):
         _log.warning("Response data signature / version mismatched. Aborting.")
         return
     offset += 9
-    unpack_object_fields(buf, offset, obj)
+    unpack_section(buf, offset, obj)
 
 
 # The meat of the pudding...
